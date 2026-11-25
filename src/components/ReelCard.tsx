@@ -29,34 +29,55 @@ export function ReelCard({
   onEmbedError,
 }: ReelCardProps) {
   const isActive = index === activeIndex;
+  const isNext = index === activeIndex + 1;
+  const shouldMount = Math.abs(index - activeIndex) <= 1;
   const effectiveMuted = !audioUnlocked || isMuted;
 
   const playerMountRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const playerReadyRef = useRef<boolean>(false);
+  const prebufferedRef = useRef<boolean>(false);
   const lastTapRef = useRef<number>(0);
   const singleTapTimerRef = useRef<number | null>(null);
   const revealTimerRef = useRef<number | null>(null);
+  const prebufferTimerRef = useRef<number | null>(null);
   const errorReportedRef = useRef<boolean>(false);
 
   const isActiveRef = useRef<boolean>(isActive);
   isActiveRef.current = isActive;
+  const isNextRef = useRef<boolean>(isNext);
+  isNextRef.current = isNext;
   const isPausedRef = useRef<boolean>(false);
+  const effectiveMutedRef = useRef<boolean>(effectiveMuted);
+  effectiveMutedRef.current = effectiveMuted;
 
   const [isPaused, setIsPaused] = useState(false);
   const [videoPlaying, setVideoPlaying] = useState(false);
+  const [playerReadyTick, setPlayerReadyTick] = useState(0);
   const [thumbSrc, setThumbSrc] = useState(
     video.thumbnail || `https://i.ytimg.com/vi/${video.id}/oardefault.jpg`
   );
+  const [thumbStep, setThumbStep] = useState(0);
   const [thumbFailed, setThumbFailed] = useState(false);
   const [burstKey, setBurstKey] = useState(0);
 
   isPausedRef.current = isPaused;
 
-  // Mount ONLY the active reel's player with native mute=0 once audio is unlocked
-  // This gives 100% bandwidth to the active reel and guarantees sound works natively
+  const scheduleReveal = (delayMs: number) => {
+    if (revealTimerRef.current) {
+      window.clearTimeout(revealTimerRef.current);
+    }
+    revealTimerRef.current = window.setTimeout(() => {
+      if (isActiveRef.current && !isPausedRef.current) {
+        setVideoPlaying(true);
+      }
+    }, delayMs);
+  };
+
+  // Mount player for active, previous (-1), and next (+1) reels so swiping transitions instantly
+  // without waiting for a cold YouTube iframe boot or showing a black frame.
   useEffect(() => {
-    if (!isActive) {
+    if (!shouldMount) {
       if (playerRef.current) {
         try {
           playerRef.current.destroy();
@@ -64,8 +85,9 @@ export function ReelCard({
           // Ignore
         }
         playerRef.current = null;
-        playerReadyRef.current = false;
       }
+      playerReadyRef.current = false;
+      prebufferedRef.current = false;
       setIsPaused(false);
       isPausedRef.current = false;
       setVideoPlaying(false);
@@ -77,8 +99,10 @@ export function ReelCard({
     let cancelled = false;
     const container = playerMountRef.current;
     container.innerHTML = '';
+    playerReadyRef.current = false;
+    prebufferedRef.current = false;
 
-    // Create iframe with explicit allow="autoplay" BEFORE setting src so browser grants audio permission immediately
+    const initialMuteParam = audioUnlocked ? 0 : 1;
     const iframeEl = document.createElement('iframe');
     iframeEl.className =
       'absolute -top-[64px] left-1/2 -translate-x-1/2 h-[calc(100%+128px)] aspect-video max-w-none border-0 pointer-events-none';
@@ -87,44 +111,60 @@ export function ReelCard({
       'autoplay; encrypted-media; gyroscope; picture-in-picture'
     );
     iframeEl.setAttribute('title', video.title);
-    iframeEl.src = `https://www.youtube.com/embed/${video.id}?autoplay=1&mute=${
-      effectiveMuted ? 1 : 0
-    }&playsinline=1&controls=0&rel=0&modestbranding=1&iv_load_policy=3&disablekb=1&fs=0&enablejsapi=1&origin=${encodeURIComponent(
+    iframeEl.src = `https://www.youtube.com/embed/${video.id}?autoplay=${
+      isActiveRef.current ? 1 : 0
+    }&mute=${initialMuteParam}&playsinline=1&controls=0&rel=0&modestbranding=1&iv_load_policy=3&disablekb=1&fs=0&enablejsapi=1&origin=${encodeURIComponent(
       window.location.origin
     )}`;
     container.appendChild(iframeEl);
 
     loadYouTubeIframeAPI().then((YT) => {
-      if (cancelled || !playerMountRef.current || !isActiveRef.current) return;
+      if (cancelled || !playerMountRef.current) return;
 
       const player = new YT.Player(iframeEl, {
         events: {
           onReady: ({ target }) => {
-            if (cancelled || !isActiveRef.current) return;
+            if (cancelled) return;
             playerReadyRef.current = true;
-            if (!effectiveMuted) {
-              target.unMute();
-              target.setVolume(100);
-            }
-            target.playVideo();
-          },
-          onStateChange: ({ data: state, target }) => {
-            if (cancelled || !isActiveRef.current) return;
+            setPlayerReadyTick((t) => t + 1);
 
-            if (state === 1) {
-              if (!effectiveMuted) {
+            if (isActiveRef.current && !isPausedRef.current) {
+              if (!effectiveMutedRef.current) {
                 target.unMute();
                 target.setVolume(100);
+              } else {
+                target.mute();
+              }
+              target.playVideo();
+            }
+          },
+          onStateChange: ({ data: state, target }) => {
+            if (cancelled) return;
+
+            // Pre-buffer complete for upcoming (+1) reel: immediately pause at 0:00 silently
+            if (!isActiveRef.current) {
+              if (state === 1) {
+                prebufferedRef.current = true;
+                try {
+                  target.pauseVideo();
+                  target.seekTo(0, true);
+                } catch {
+                  // Ignore
+                }
+              }
+              return;
+            }
+
+            if (state === 1) {
+              if (!effectiveMutedRef.current) {
+                target.unMute();
+                target.setVolume(100);
+              } else {
+                target.mute();
               }
               if (!isPausedRef.current) {
-                if (revealTimerRef.current) {
-                  window.clearTimeout(revealTimerRef.current);
-                }
-                revealTimerRef.current = window.setTimeout(() => {
-                  if (isActiveRef.current && !isPausedRef.current) {
-                    setVideoPlaying(true);
-                  }
-                }, 150);
+                // Only reveal iframe after real video frames start painting (zero black screen)
+                scheduleReveal(prebufferedRef.current ? 90 : 200);
               }
             } else if (state === 0) {
               if (!isPausedRef.current) {
@@ -138,7 +178,7 @@ export function ReelCard({
             }
           },
           onError: () => {
-            if (!errorReportedRef.current) {
+            if (!errorReportedRef.current && isActiveRef.current) {
               errorReportedRef.current = true;
               onEmbedError(video.id);
             }
@@ -149,18 +189,13 @@ export function ReelCard({
       playerRef.current = player;
     });
 
-    // Fallback reveal in case iframe plays natively even if YT API callback lags
-    const nativeReveal = window.setTimeout(() => {
-      if (!cancelled && isActiveRef.current && !isPausedRef.current) {
-        setVideoPlaying(true);
-      }
-    }, 600);
-
     return () => {
       cancelled = true;
-      window.clearTimeout(nativeReveal);
       if (revealTimerRef.current) {
         window.clearTimeout(revealTimerRef.current);
+      }
+      if (prebufferTimerRef.current) {
+        window.clearTimeout(prebufferTimerRef.current);
       }
       if (playerRef.current) {
         try {
@@ -169,18 +204,108 @@ export function ReelCard({
           // Ignore
         }
         playerRef.current = null;
-        playerReadyRef.current = false;
       }
+      playerReadyRef.current = false;
+      prebufferedRef.current = false;
       if (container) {
         container.innerHTML = '';
       }
     };
-  }, [isActive, video.id, video.title, effectiveMuted, onEmbedError]);
+  }, [shouldMount, video.id, video.title, audioUnlocked, onEmbedError]);
+
+  // Coordinate active playback, silent background pre-buffering (+1), and pause state
+  useEffect(() => {
+    if (prebufferTimerRef.current) {
+      window.clearTimeout(prebufferTimerRef.current);
+      prebufferTimerRef.current = null;
+    }
+
+    const player = playerRef.current;
+
+    if (!isActive) {
+      setIsPaused(false);
+      isPausedRef.current = false;
+      setVideoPlaying(false);
+      if (revealTimerRef.current) {
+        window.clearTimeout(revealTimerRef.current);
+      }
+
+      if (player && playerReadyRef.current) {
+        try {
+          player.setVolume(0);
+          player.mute();
+          player.pauseVideo();
+        } catch {
+          // Ignore
+        }
+
+        // Silently pre-buffer the very next reel after active reel gets head-start
+        if (isNext && !prebufferedRef.current) {
+          prebufferTimerRef.current = window.setTimeout(() => {
+            if (!isActiveRef.current && isNextRef.current && playerRef.current && playerReadyRef.current) {
+              try {
+                playerRef.current.setVolume(0);
+                playerRef.current.mute();
+                window.setTimeout(() => {
+                  if (!isActiveRef.current && isNextRef.current && playerRef.current) {
+                    playerRef.current.playVideo();
+                  }
+                }, 60);
+              } catch {
+                // Ignore
+              }
+            }
+          }, 320);
+        }
+      }
+      return;
+    }
+
+    if (!player || !playerReadyRef.current) return;
+
+    try {
+      if (isPaused) {
+        player.pauseVideo();
+        setVideoPlaying(false);
+      } else {
+        if (!effectiveMuted) {
+          player.unMute();
+          player.setVolume(100);
+        } else {
+          player.mute();
+        }
+        player.playVideo();
+        if (player.getPlayerState?.() === 1) {
+          scheduleReveal(90);
+        }
+      }
+    } catch {
+      // Ignore transient YT API call error
+    }
+  }, [isActive, isNext, isPaused, effectiveMuted, playerReadyTick]);
+
+  // Safety timeout: if an active video never reaches PLAYING within 7s, skip broken Short
+  useEffect(() => {
+    if (!isActive || videoPlaying || isPaused) return;
+    const stallTimer = window.setTimeout(() => {
+      if (isActiveRef.current && !isPausedRef.current && !errorReportedRef.current) {
+        const state = playerRef.current?.getPlayerState?.();
+        if (state === 1) {
+          setVideoPlaying(true);
+        } else if (state === -1 || state === undefined) {
+          errorReportedRef.current = true;
+          onEmbedError(video.id);
+        }
+      }
+    }, 7000);
+    return () => window.clearTimeout(stallTimer);
+  }, [isActive, videoPlaying, isPaused, video.id, onEmbedError]);
 
   useEffect(() => {
     return () => {
       if (singleTapTimerRef.current) window.clearTimeout(singleTapTimerRef.current);
       if (revealTimerRef.current) window.clearTimeout(revealTimerRef.current);
+      if (prebufferTimerRef.current) window.clearTimeout(prebufferTimerRef.current);
     };
   }, []);
 
@@ -220,9 +345,11 @@ export function ReelCard({
             setVideoPlaying(false);
             player.pauseVideo();
           } else {
-            if (!effectiveMuted) {
+            if (!effectiveMutedRef.current) {
               player.unMute();
               player.setVolume(100);
+            } else {
+              player.mute();
             }
             player.playVideo();
           }
@@ -232,41 +359,62 @@ export function ReelCard({
     }, 200);
   };
 
+  const handleThumbError = () => {
+    const fallbacks = [
+      `https://i.ytimg.com/vi/${video.id}/oar2.jpg`,
+      `https://i.ytimg.com/vi/${video.id}/oardefault.jpg`,
+      `https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`,
+    ];
+    const nextFallback = fallbacks.find((url, idx) => idx >= thumbStep && url !== thumbSrc);
+    if (nextFallback) {
+      setThumbStep((s) => s + 1);
+      setThumbSrc(nextFallback);
+    } else {
+      setThumbFailed(true);
+    }
+  };
+
   const showIframe = isActive && videoPlaying && !isPaused;
+  const showBufferingBar = isActive && !videoPlaying && !isPaused;
 
   return (
     <section
       aria-label={video.title}
       className="snap-start snap-always h-full w-full shrink-0 flex items-center justify-center sm:py-3 will-change-transform"
     >
-      <div className="relative h-full w-full sm:w-auto sm:aspect-[9/16] sm:max-h-[880px] bg-zinc-950 sm:rounded-2xl overflow-hidden sm:border sm:border-white/[0.08] shadow-2xl">
-        {/* Clean Thumbnail Backdrop */}
+      <div className="relative h-full w-full sm:w-auto sm:aspect-[9/16] sm:max-h-[880px] bg-zinc-900 sm:rounded-2xl overflow-hidden sm:border sm:border-white/[0.08] shadow-2xl">
+        {/* Clean High-Res Thumbnail Backdrop stays visible until real decoded frames paint (zero black screen) */}
         {!thumbFailed ? (
           <img
             src={thumbSrc}
             alt={video.title}
             referrerPolicy="no-referrer"
-            loading={Math.abs(index - activeIndex) <= 5 ? 'eager' : 'lazy'}
-            onError={() => {
-              if (!thumbSrc.includes('hqdefault.jpg')) {
-                setThumbSrc(`https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`);
-              } else {
-                setThumbFailed(true);
-              }
-            }}
+            decoding="sync"
+            loading={Math.abs(index - activeIndex) <= 6 ? 'eager' : 'lazy'}
+            onError={handleThumbError}
             className="absolute inset-0 h-full w-full object-cover select-none pointer-events-none"
           />
         ) : (
-          <div className="absolute inset-0 bg-zinc-950" />
+          <div className="absolute inset-0 bg-gradient-to-b from-zinc-900 to-zinc-950" />
         )}
 
-        {/* Active YT.Player Container */}
+        {/* Active / Pre-warmed YT.Player Container */}
         <div
           ref={playerMountRef}
-          className={`absolute inset-0 pointer-events-none transition-opacity duration-100 ${
+          className={`absolute inset-0 pointer-events-none transition-opacity duration-150 ${
             showIframe ? 'opacity-100' : 'opacity-0'
           }`}
         />
+
+        {/* Subtle 2px bottom progress shimmer while buffering next frame */}
+        {showBufferingBar && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 inset-x-0 z-20 h-[2px] bg-white/10 overflow-hidden"
+          >
+            <div className="h-full w-1/2 bg-rose-500 animate-pulse rounded-full" />
+          </div>
+        )}
 
         {/* Gesture Overlay */}
         <div
