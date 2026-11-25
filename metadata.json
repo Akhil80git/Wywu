@@ -1,0 +1,6 @@
+{
+  "name": "ShortFlow",
+  "description": "Ultra-fast, distraction-free YouTube Shorts scroller that adapts to what you like — 100% free with zero API keys.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

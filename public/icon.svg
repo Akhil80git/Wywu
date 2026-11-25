@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#09090B" />
+  <rect x="24" y="24" width="464" height="464" rx="96" fill="#18181B" stroke="#27272A" stroke-width="4" />
+  <defs>
+    <linearGradient id="shortflow-grad" x1="128" y1="96" x2="384" y2="416" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FB7185" />
+      <stop offset="100%" stop-color="#E11D48" />
+    </linearGradient>
+  </defs>
+  <rect x="136" y="88" width="240" height="336" rx="52" fill="url(#shortflow-grad)" />
+  <path d="M222 194L320 256L222 318V194Z" fill="#FFFFFF" />
+</svg>
