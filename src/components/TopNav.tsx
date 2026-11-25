@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, Clock, Heart, Search, X } from 'lucide-react';
+import { ArrowUpRight, Clock, Heart, Search, Sparkles, X } from 'lucide-react';
 import type { TopicOption } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -49,6 +49,7 @@ export function TopNav({
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [intentLabel, setIntentLabel] = useState<string | null>(null);
   const [recentSearches, setRecentSearches] = useState<string[]>(loadRecentSearches);
   const [highlightedIdx, setHighlightedIdx] = useState(-1);
 
@@ -91,6 +92,7 @@ export function TopNav({
     setIsSearchExpanded(false);
     setSearchQuery('');
     setSuggestions([]);
+    setIntentLabel(null);
     setHighlightedIdx(-1);
   };
 
@@ -123,12 +125,13 @@ export function TopNav({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isSearchExpanded]);
 
-  // Fetch live YouTube autocomplete suggestions as user types
+  // Fetch live YouTube autocomplete + smart semantic intent suggestions as user types
   useEffect(() => {
     if (!isSearchExpanded) return;
     const trimmed = searchQuery.trim();
     if (trimmed.length < 1) {
       setSuggestions([]);
+      setIntentLabel(null);
       setHighlightedIdx(-1);
       return;
     }
@@ -141,14 +144,16 @@ export function TopNav({
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (Array.isArray(data.suggestions)) {
-          setSuggestions(data.suggestions.slice(0, 6));
-          setHighlightedIdx(-1);
-        }
+        const ytList: string[] = Array.isArray(data.suggestions) ? data.suggestions : [];
+        const smartList: string[] = Array.isArray(data.smartQueries) ? data.smartQueries : [];
+        const merged = Array.from(new Set([...smartList, ...ytList])).slice(0, 6);
+        setSuggestions(merged);
+        setIntentLabel(typeof data.intentLabel === 'string' && data.intentLabel ? data.intentLabel : null);
+        setHighlightedIdx(-1);
       } catch {
         // Ignore aborted or failed suggestion requests
       }
-    }, 130);
+    }, 100);
 
     return () => {
       controller.abort();
@@ -248,8 +253,8 @@ export function TopNav({
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="Search exact Shorts (e.g. Virat Kohli, BMW M4...)"
-                  maxLength={60}
+                  placeholder="Describe or search anything (e.g. desi comedy, BMW M4 drift)..."
+                  maxLength={140}
                   aria-label="Search YouTube Shorts topic"
                   aria-autocomplete="list"
                   className="flex-1 min-w-0 bg-transparent text-xs sm:text-sm text-white placeholder:text-zinc-500 focus:outline-none"
@@ -260,6 +265,7 @@ export function TopNav({
                     onClick={() => {
                       setSearchQuery('');
                       setSuggestions([]);
+                      setIntentLabel(null);
                       inputRef.current?.focus();
                     }}
                     aria-label="Clear search text"
@@ -296,9 +302,16 @@ export function TopNav({
                       className="w-full px-4 py-2.5 flex items-center justify-between gap-3 text-left text-xs sm:text-sm text-white hover:bg-white/[0.06] cursor-pointer transition-colors"
                     >
                       <span className="flex items-center gap-2.5 min-w-0">
-                        <Search className="w-4 h-4 text-rose-400 shrink-0" />
-                        <span className="truncate font-medium">
-                          Search Shorts for &ldquo;{searchQuery.trim()}&rdquo;
+                        <Sparkles className="w-4 h-4 text-rose-400 shrink-0" />
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium">
+                            Search Shorts for &ldquo;{searchQuery.trim()}&rdquo;
+                          </span>
+                          {intentLabel && (
+                            <span className="block truncate text-[11px] text-rose-400/90">
+                              Understood: {intentLabel}
+                            </span>
+                          )}
                         </span>
                       </span>
                       <ArrowUpRight className="w-4 h-4 text-zinc-500 shrink-0" />

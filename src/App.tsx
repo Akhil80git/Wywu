@@ -6,14 +6,17 @@ import { ReelCard } from './components/ReelCard';
 import { TopNav } from './components/TopNav';
 import type { ShortVideo, TopicOption } from './types';
 import {
+  buildRealtimeBoostProfile,
   buildTasteProfile,
+  extractKeywords,
   getTopTasteKeywords,
   rerankUpcomingQueue,
 } from './utils/recommendations';
+import { loadYouTubeIframeAPI } from './utils/youtubeApi';
 
 const STORAGE_KEY = 'shortflow_liked_shorts_v1';
 const WATCHED_STORAGE_KEY = 'shortflow_watched_ids_v1';
-const MAX_WATCHED_HISTORY = 2000;
+const MAX_WATCHED_HISTORY = 15000;
 
 function loadWatchedHistory(): string[] {
   try {
@@ -73,32 +76,74 @@ export default function App() {
   const activeTopicRef = useRef(activeTopic);
   activeTopicRef.current = activeTopic;
   const topicCacheRef = useRef<Map<string, ShortVideo[]>>(new Map());
+  const lastActiveIndexRef = useRef(0);
 
-  const markAsWatched = useCallback((videoId: string) => {
-    if (!videoId || watchedSetRef.current.has(videoId)) return;
-    watchedSetRef.current.add(videoId);
-    watchedOrderRef.current.push(videoId);
-    if (watchedOrderRef.current.length > MAX_WATCHED_HISTORY) {
-      watchedOrderRef.current = watchedOrderRef.current.slice(-MAX_WATCHED_HISTORY);
-      watchedSetRef.current = new Set(watchedOrderRef.current);
-    }
+  const persistWatched = useCallback(() => {
     try {
       localStorage.setItem(WATCHED_STORAGE_KEY, JSON.stringify(watchedOrderRef.current));
     } catch {
-      // Ignore storage quota errors
+      // If storage quota is reached, trim oldest 20% and retry
+      try {
+        const trimmed = watchedOrderRef.current.slice(
+          Math.floor(watchedOrderRef.current.length * 0.2)
+        );
+        watchedOrderRef.current = trimmed;
+        localStorage.setItem(WATCHED_STORAGE_KEY, JSON.stringify(trimmed));
+      } catch {
+        // Ignore storage quota errors
+      }
     }
   }, []);
 
+  const markAsWatched = useCallback(
+    (videoId: string) => {
+      if (!videoId || watchedSetRef.current.has(videoId)) return;
+      watchedSetRef.current.add(videoId);
+      watchedOrderRef.current.push(videoId);
+      if (watchedOrderRef.current.length > MAX_WATCHED_HISTORY) {
+        watchedOrderRef.current = watchedOrderRef.current.slice(-MAX_WATCHED_HISTORY);
+      }
+      persistWatched();
+    },
+    [persistWatched]
+  );
+
+  const markManyAsWatched = useCallback(
+    (videoIds: string[]) => {
+      let added = false;
+      for (const videoId of videoIds) {
+        if (!videoId || watchedSetRef.current.has(videoId)) continue;
+        watchedSetRef.current.add(videoId);
+        watchedOrderRef.current.push(videoId);
+        added = true;
+      }
+      if (!added) return;
+      if (watchedOrderRef.current.length > MAX_WATCHED_HISTORY) {
+        watchedOrderRef.current = watchedOrderRef.current.slice(-MAX_WATCHED_HISTORY);
+      }
+      persistWatched();
+    },
+    [persistWatched]
+  );
+
   const tasteProfile = useMemo(() => buildTasteProfile(likedVideos), [likedVideos]);
   const topTasteKeywords = useMemo(
-    () => getTopTasteKeywords(tasteProfile, 4),
+    () => getTopTasteKeywords(tasteProfile, 5),
     [tasteProfile]
   );
+
+  const topTasteKeywordsRef = useRef<string[]>(topTasteKeywords);
+  topTasteKeywordsRef.current = topTasteKeywords;
 
   const likedIdSet = useMemo(
     () => new Set(likedVideos.map((v) => v.id)),
     [likedVideos]
   );
+
+  // Boot YouTube IFrame Player API immediately on app start for zero-lag playback
+  useEffect(() => {
+    void loadYouTubeIframeAPI();
+  }, []);
 
   // Persist liked videos to localStorage
   useEffect(() => {
@@ -112,12 +157,15 @@ export default function App() {
   const fetchBatch = useCallback(
     async (topicQuery: string, pageNum: number, customTasteKeywords?: string[]) => {
       const excludeSet = new Set<string>([
-        ...watchedOrderRef.current.slice(-1600),
-        ...Array.from(seenIdsRef.current).slice(-250),
+        ...watchedOrderRef.current.slice(-15000),
+        ...Array.from(seenIdsRef.current).slice(-400),
       ]);
 
       const keywordsToUse =
-        topicQuery === 'for-you' ? customTasteKeywords ?? topTasteKeywords : [];
+        customTasteKeywords ??
+        (topicQuery === 'for-you'
+          ? topTasteKeywordsRef.current
+          : topTasteKeywordsRef.current.slice(0, 3));
 
       const res = await fetch('/api/shorts', {
         method: 'POST',
@@ -136,7 +184,7 @@ export default function App() {
       const rawItems = (data.items || []) as ShortVideo[];
       return rawItems.filter((v) => !watchedSetRef.current.has(v.id));
     },
-    [topTasteKeywords]
+    []
   );
 
   const loadInitialTopic = useCallback(
@@ -144,13 +192,14 @@ export default function App() {
       setErrorMsg(null);
       pageRef.current = 0;
       seenIdsRef.current = new Set();
+      lastActiveIndexRef.current = 0;
       setActiveIndex(0);
 
       if (feedRef.current) {
         feedRef.current.scrollTo({ top: 0, behavior: 'auto' });
       }
 
-      // Filter any cached items against persisted watched history so watched reels never repeat
+      // Filter any cached items against persisted watched history so watched reels NEVER repeat
       const cachedRaw = topicCacheRef.current.get(topic.id);
       const cachedUnwatched = cachedRaw
         ? cachedRaw.filter((v) => !watchedSetRef.current.has(v.id))
@@ -169,12 +218,13 @@ export default function App() {
         let items = await fetchBatch(topic.query, 0);
         if (activeTopicRef.current.id !== topic.id) return;
 
-        if (items.length < 4) {
-          const deeper = await fetchBatch(topic.query, 1);
+        // Automatically dig deeper if user already watched most of page 0
+        for (let extraPage = 1; extraPage <= 2 && items.length < 8; extraPage++) {
+          const deeper = await fetchBatch(topic.query, extraPage);
           if (activeTopicRef.current.id !== topic.id) return;
           const existingIds = new Set(items.map((v) => v.id));
           items = [...items, ...deeper.filter((v) => !existingIds.has(v.id))];
-          pageRef.current = 1;
+          pageRef.current = extraPage;
         }
 
         items.forEach((v) => seenIdsRef.current.add(v.id));
@@ -184,6 +234,25 @@ export default function App() {
         setQueue(items);
         if (items.length === 0) {
           setErrorMsg('Is topic ki saari reels aap dekh chuke hain ya koi nayi Shorts nahi mili.');
+        } else if (items.length < 18) {
+          // Quietly pre-fetch next page right away so fast scrolling never hits a loading gap
+          const currentTopicId = topic.id;
+          const nextPage = pageRef.current + 1;
+          void fetchBatch(topic.query, nextPage)
+            .then((more) => {
+              if (activeTopicRef.current.id !== currentTopicId || more.length === 0) return;
+              pageRef.current = nextPage;
+              setQueue((prev) => {
+                const existing = new Set(prev.map((v) => v.id));
+                const fresh = more.filter(
+                  (v) => !existing.has(v.id) && !watchedSetRef.current.has(v.id)
+                );
+                if (fresh.length === 0) return prev;
+                fresh.forEach((v) => seenIdsRef.current.add(v.id));
+                return [...prev, ...fresh];
+              });
+            })
+            .catch(() => {});
         }
       } catch {
         if (activeTopicRef.current.id !== topic.id) return;
@@ -202,20 +271,31 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTopic.id]);
 
-  // Mark currently viewed reel as watched after brief viewing so it never repeats in future feeds
+  // Immediately mark currently viewed reel as watched (and any jumped-over reels) so watched reels NEVER repeat
   useEffect(() => {
-    const currentVideo = queue[activeIndex];
-    if (!currentVideo) return;
-    const timer = window.setTimeout(() => {
-      markAsWatched(currentVideo.id);
-    }, 450);
-    return () => window.clearTimeout(timer);
-  }, [activeIndex, queue, markAsWatched]);
+    if (queue.length === 0) return;
+    const prevIdx = lastActiveIndexRef.current;
+    const startIdx = Math.min(prevIdx, activeIndex);
+    const endIdx = Math.max(prevIdx, activeIndex);
+    const idsToMark: string[] = [];
 
-  // Silently warm-cache default top nav categories in browser RAM excluding already-watched IDs
+    for (let i = startIdx; i <= endIdx; i++) {
+      const item = queue[i];
+      if (item?.id) idsToMark.push(item.id);
+    }
+    const currentVideo = queue[activeIndex];
+    if (currentVideo?.id) idsToMark.push(currentVideo.id);
+
+    if (idsToMark.length > 0) {
+      markManyAsWatched(idsToMark);
+    }
+    lastActiveIndexRef.current = activeIndex;
+  }, [activeIndex, queue, markManyAsWatched]);
+
+  // Silently warm-cache ALL default top nav categories in browser RAM excluding already-watched IDs
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      DEFAULT_TOPICS.slice(1, 5).forEach(async (t) => {
+      DEFAULT_TOPICS.slice(1).forEach(async (t) => {
         if (topicCacheRef.current.has(t.id)) return;
         try {
           const res = await fetch('/api/shorts', {
@@ -224,7 +304,7 @@ export default function App() {
             body: JSON.stringify({
               topic: t.query,
               page: 0,
-              exclude: watchedOrderRef.current.slice(-1500),
+              exclude: watchedOrderRef.current.slice(-15000),
             }),
           });
           if (!res.ok) return;
@@ -241,7 +321,7 @@ export default function App() {
           // Ignore background prefetch errors
         }
       });
-    }, 600);
+    }, 220);
     return () => window.clearTimeout(timer);
   }, []);
 
@@ -251,11 +331,19 @@ export default function App() {
     setIsFetchingMore(true);
 
     try {
-      const nextPage = pageRef.current + 1;
       const currentTopicId = activeTopicRef.current.id;
-      const items = await fetchBatch(activeTopicRef.current.query, nextPage);
+      let nextPage = pageRef.current + 1;
+      let items = await fetchBatch(activeTopicRef.current.query, nextPage);
 
       if (activeTopicRef.current.id !== currentTopicId) return;
+
+      // If all fetched items were already watched, auto-advance to deeper page
+      if (items.length < 3) {
+        nextPage += 1;
+        const deeper = await fetchBatch(activeTopicRef.current.query, nextPage);
+        if (activeTopicRef.current.id !== currentTopicId) return;
+        items = [...items, ...deeper];
+      }
 
       pageRef.current = nextPage;
       if (items.length > 0) {
@@ -276,16 +364,16 @@ export default function App() {
     }
   }, [fetchBatch, isLoading]);
 
-  // Prefetch next batch very early (12 reels ahead) so scrolling never runs dry
+  // Prefetch next batch very early (14 reels ahead) so scrolling never runs dry
   useEffect(() => {
-    if (queue.length > 0 && activeIndex >= queue.length - 12) {
+    if (queue.length > 0 && activeIndex >= queue.length - 14) {
       loadMore();
     }
   }, [activeIndex, queue.length, loadMore]);
 
-  // Preload thumbnails for upcoming 8 reels into browser image cache
+  // Preload thumbnails for upcoming 12 reels into browser image cache
   useEffect(() => {
-    const upcoming = queue.slice(activeIndex + 1, activeIndex + 9);
+    const upcoming = queue.slice(activeIndex + 1, activeIndex + 13);
     upcoming.forEach((v) => {
       const img = new Image();
       img.referrerPolicy = 'no-referrer';
@@ -348,7 +436,7 @@ export default function App() {
     setActiveTopic(topic);
   }, []);
 
-  // Like / Unlike handler + instant adaptive feed re-ranking & background fetch
+  // Real-time Like / Unlike handler: immediately shifts the VERY NEXT reels to match what the user just liked
   const handleToggleLike = useCallback(
     async (video: ShortVideo) => {
       markAsWatched(video.id);
@@ -365,34 +453,49 @@ export default function App() {
       topicCacheRef.current.delete('for-you');
 
       const updatedProfile = buildTasteProfile(nextLiked);
-      const updatedKeywords = getTopTasteKeywords(updatedProfile, 4);
+      const updatedKeywords = getTopTasteKeywords(updatedProfile, 5);
+      topTasteKeywordsRef.current = updatedKeywords;
 
-      setQueue((prev) => rerankUpcomingQueue(prev, activeIndex, updatedProfile));
+      if (alreadyLiked) {
+        setQueue((prev) => rerankUpcomingQueue(prev, activeIndex, updatedProfile));
+        return;
+      }
 
-      if (!alreadyLiked && updatedKeywords.length > 0) {
+      // Immediately boost the just-liked reel's vibe so the VERY NEXT reel (activeIndex + 1) adapts instantly
+      const realtimeProfile = buildRealtimeBoostProfile(video, updatedProfile);
+      setQueue((prev) => rerankUpcomingQueue(prev, activeIndex, realtimeProfile));
+
+      const videoKeywords =
+        video.keywords?.length > 0
+          ? video.keywords
+          : extractKeywords(video.title, video.topic);
+      const seedTopics = Array.from(
+        new Set([...videoKeywords.slice(0, 3), ...updatedKeywords.slice(0, 2)])
+      ).slice(0, 4);
+
+      if (seedTopics.length > 0) {
         try {
-          const seedTopics =
-            video.keywords.length > 0
-              ? video.keywords.slice(0, 2)
-              : updatedKeywords.slice(0, 2);
+          const targetTopicId = activeTopicRef.current.id;
+          const isForYou = targetTopicId === 'for-you';
           const freshItems = await fetchBatch(
-            activeTopicRef.current.id === 'for-you'
-              ? 'for-you'
-              : activeTopicRef.current.query,
+            isForYou ? 'for-you' : seedTopics.slice(0, 2).join(' '),
             pageRef.current + 1,
             seedTopics
           );
+
+          if (activeTopicRef.current.id !== targetTopicId) return;
 
           if (freshItems.length > 0) {
             setQueue((prev) => {
               const existing = new Set(prev.map((v) => v.id));
               const uniqueFresh = freshItems
                 .filter((v) => !existing.has(v.id) && !watchedSetRef.current.has(v.id))
-                .slice(0, 6);
+                .slice(0, 8);
               if (uniqueFresh.length === 0) return prev;
               uniqueFresh.forEach((v) => seenIdsRef.current.add(v.id));
 
-              const insertAt = Math.min(activeIndex + 3, prev.length);
+              // Inject freshly matched reels right at activeIndex + 1 so the very next swipe matches!
+              const insertAt = Math.min(activeIndex + 1, prev.length);
               return [
                 ...prev.slice(0, insertAt),
                 ...uniqueFresh,
@@ -436,9 +539,10 @@ export default function App() {
         return;
       }
 
+      const shortLabel = query.length > 26 ? `${query.slice(0, 24).trim()}…` : query;
       const newTopic: TopicOption = {
         id: normalizedId,
-        label: query,
+        label: shortLabel,
         query,
         isCustom: true,
       };

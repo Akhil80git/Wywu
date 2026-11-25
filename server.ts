@@ -3,24 +3,24 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import {
-  fetchSuggestList,
+  fetchSmartSuggestBundle,
   fetchYouTubeShortsForQuery,
   handleShortsRequest,
 } from './lib/shortsService.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 
-// Pre-warm default topics in background so category switches respond in <3ms
+// Pre-warm all default topics in background so category switches respond instantly
 async function prewarmDefaultTopics() {
   const warmupQueries = [
     { q: 'viral funny #shorts', label: 'comedy' },
     { q: 'tech gadgets #shorts', label: 'tech' },
+    { q: 'science facts #shorts', label: 'science facts' },
+    { q: 'music #shorts', label: 'music' },
     { q: 'comedy #shorts', label: 'comedy' },
     { q: 'tech #shorts', label: 'tech' },
-    { q: 'music #shorts', label: 'music' },
     { q: 'fitness #shorts', label: 'fitness' },
     { q: 'gaming #shorts', label: 'gaming' },
-    { q: 'science facts #shorts', label: 'science facts' },
     { q: 'cooking recipe #shorts', label: 'cooking recipe' },
   ];
 
@@ -31,7 +31,7 @@ async function prewarmDefaultTopics() {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
@@ -39,8 +39,8 @@ async function startServer() {
 
   app.get('/api/suggest', async (req, res) => {
     const rawQ = typeof req.query.q === 'string' ? req.query.q : '';
-    const suggestions = await fetchSuggestList(rawQ);
-    res.json({ suggestions });
+    const bundle = await fetchSmartSuggestBundle(rawQ);
+    res.json(bundle);
   });
 
   app.get('/api/shorts', async (req, res) => {

@@ -30,7 +30,7 @@ export function ReelCard({
 }: ReelCardProps) {
   const isActive = index === activeIndex;
   const isNext = index === activeIndex + 1;
-  const shouldMount = Math.abs(index - activeIndex) <= 1;
+  const shouldMount = index >= activeIndex - 1 && index <= activeIndex + 2;
   const effectiveMuted = !audioUnlocked || isMuted;
 
   const playerMountRef = useRef<HTMLDivElement>(null);
@@ -164,7 +164,7 @@ export function ReelCard({
               }
               if (!isPausedRef.current) {
                 // Only reveal iframe after real video frames start painting (zero black screen)
-                scheduleReveal(prebufferedRef.current ? 90 : 200);
+                scheduleReveal(prebufferedRef.current ? 35 : 110);
               }
             } else if (state === 0) {
               if (!isPausedRef.current) {
@@ -239,7 +239,7 @@ export function ReelCard({
           // Ignore
         }
 
-        // Silently pre-buffer the very next reel after active reel gets head-start
+        // Silently pre-buffer the very next reel right after active reel gets head-start
         if (isNext && !prebufferedRef.current) {
           prebufferTimerRef.current = window.setTimeout(() => {
             if (!isActiveRef.current && isNextRef.current && playerRef.current && playerReadyRef.current) {
@@ -250,12 +250,12 @@ export function ReelCard({
                   if (!isActiveRef.current && isNextRef.current && playerRef.current) {
                     playerRef.current.playVideo();
                   }
-                }, 60);
+                }, 25);
               } catch {
                 // Ignore
               }
             }
-          }, 320);
+          }, 140);
         }
       }
       return;
@@ -276,7 +276,7 @@ export function ReelCard({
         }
         player.playVideo();
         if (player.getPlayerState?.() === 1) {
-          scheduleReveal(90);
+          scheduleReveal(30);
         }
       }
     } catch {
@@ -390,7 +390,7 @@ export function ReelCard({
             alt={video.title}
             referrerPolicy="no-referrer"
             decoding="sync"
-            loading={Math.abs(index - activeIndex) <= 6 ? 'eager' : 'lazy'}
+            loading={Math.abs(index - activeIndex) <= 10 ? 'eager' : 'lazy'}
             onError={handleThumbError}
             className="absolute inset-0 h-full w-full object-cover select-none pointer-events-none"
           />
@@ -489,7 +489,7 @@ export function ReelCard({
           }}
           aria-pressed={isLiked}
           aria-label={isLiked ? 'Unlike this reel' : 'Like this reel'}
-          className="absolute bottom-5 right-3.5 z-20 min-h-[44px] min-w-[44px] flex items-center justify-center transition-transform duration-100 active:scale-90 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 rounded-full"
+          className="absolute bottom-5 left-3.5 z-20 min-h-[44px] min-w-[44px] flex items-center justify-center transition-transform duration-100 active:scale-90 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 rounded-full"
         >
           <Heart
             className={`w-6 h-6 drop-shadow-[0_2px_6px_rgba(0,0,0,0.85)] transition-all duration-150 ${

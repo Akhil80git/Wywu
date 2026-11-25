@@ -18,6 +18,11 @@ export function extractKeywords(title: string, topic?: string): string[] {
     const cleanTopic = topic.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim();
     if (cleanTopic.length >= 2) {
       tokens.add(cleanTopic);
+      for (const part of cleanTopic.split(/\s+/)) {
+        if (part.length >= 3 && !STOP_WORDS.has(part)) {
+          tokens.add(part);
+        }
+      }
     }
   }
 
@@ -44,19 +49,18 @@ export function extractKeywords(title: string, topic?: string): string[] {
     }
   }
 
-  return Array.from(tokens).slice(0, 8);
+  return Array.from(tokens).slice(0, 10);
 }
 
 export function buildTasteProfile(likedVideos: ShortVideo[]): TasteProfile {
   const profile: TasteProfile = {};
-  const total = likedVideos.length;
 
   likedVideos.forEach((video, idx) => {
-    // Most recently liked videos get slightly stronger weight
-    const recencyBoost = 1 + (total - idx) * 0.08;
+    // Most recently liked videos strongly steer the real-time feed
+    const recencyBoost = 1 + Math.max(0, 14 - idx) * 0.25;
     const topicKey = video.topic.toLowerCase().trim();
     if (topicKey && topicKey !== 'for-you') {
-      profile[topicKey] = (profile[topicKey] || 0) + 3 * recencyBoost;
+      profile[topicKey] = (profile[topicKey] || 0) + 3.2 * recencyBoost;
     }
 
     const keywords = video.keywords?.length
@@ -64,14 +68,44 @@ export function buildTasteProfile(likedVideos: ShortVideo[]): TasteProfile {
       : extractKeywords(video.title, video.topic);
 
     for (const kw of keywords) {
-      profile[kw] = (profile[kw] || 0) + 1.5 * recencyBoost;
+      const cleanKw = kw.toLowerCase().trim();
+      if (cleanKw && !STOP_WORDS.has(cleanKw)) {
+        profile[cleanKw] = (profile[cleanKw] || 0) + 1.8 * recencyBoost;
+      }
     }
   });
 
   return profile;
 }
 
-export function getTopTasteKeywords(profile: TasteProfile, limit = 4): string[] {
+export function buildRealtimeBoostProfile(
+  justLikedVideo: ShortVideo,
+  baseProfile: TasteProfile
+): TasteProfile {
+  const boosted: TasteProfile = { ...baseProfile };
+  const topicKey = justLikedVideo.topic.toLowerCase().trim();
+  if (topicKey && topicKey !== 'for-you') {
+    boosted[topicKey] = (boosted[topicKey] || 0) + 12;
+  }
+
+  const freshKeywords = Array.from(
+    new Set([
+      ...(justLikedVideo.keywords || []),
+      ...extractKeywords(justLikedVideo.title, justLikedVideo.topic),
+    ])
+  );
+
+  for (const kw of freshKeywords) {
+    const cleanKw = kw.toLowerCase().trim();
+    if (cleanKw.length >= 2 && !STOP_WORDS.has(cleanKw)) {
+      boosted[cleanKw] = (boosted[cleanKw] || 0) + 8;
+    }
+  }
+
+  return boosted;
+}
+
+export function getTopTasteKeywords(profile: TasteProfile, limit = 5): string[] {
   return Object.entries(profile)
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
@@ -94,14 +128,15 @@ export function scoreVideoForTaste(video: ShortVideo, profile: TasteProfile): nu
     : extractKeywords(video.title, video.topic);
 
   for (const kw of keywords) {
-    if (profile[kw]) {
-      score += profile[kw];
+    const cleanKw = kw.toLowerCase().trim();
+    if (profile[cleanKw]) {
+      score += profile[cleanKw];
     }
   }
 
   for (const [term, weight] of entries) {
     if (term.length >= 3 && lowerTitle.includes(term)) {
-      score += weight * 0.6;
+      score += weight * 0.7;
     }
   }
 
@@ -114,7 +149,8 @@ export function rerankUpcomingQueue(
   profile: TasteProfile
 ): ShortVideo[] {
   if (Object.keys(profile).length === 0) return queue;
-  const splitAt = Math.min(activeIndex + 3, queue.length);
+  // Re-rank starting immediately from the very next reel (activeIndex + 1)
+  const splitAt = Math.min(activeIndex + 1, queue.length);
   const head = queue.slice(0, splitAt);
   const tail = queue.slice(splitAt);
 
@@ -125,7 +161,7 @@ export function rerankUpcomingQueue(
       idx,
     }))
     .sort((a, b) => {
-      if (Math.abs(b.score - a.score) > 0.25) {
+      if (Math.abs(b.score - a.score) > 0.15) {
         return b.score - a.score;
       }
       return a.idx - b.idx;
